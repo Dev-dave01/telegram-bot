@@ -41,6 +41,13 @@ The `.env.example` file contains the base configuration. The bot uses strict env
 - `HEALTH_HOST` & `HEALTH_PORT`: Binds a local HTTP endpoint for health probes (e.g., Kubernetes liveness probes). Set port to 0 to disable.
 - `HEALTH_STALE_MS`: Marks the health endpoint as degraded if no successful poll completes within this window (e.g., 90000ms).
 
+### Logging
+- `LOG_LEVEL`: Minimum severity emitted (`info` by default).
+- `LOG_FORMAT`: Console format (`text` by default, or `json` for one JSON object per line).
+- `LOG_FILE`: Optional path for a local JSONL operational log. Unset by default; records are appended as redacted JSON lines regardless of `LOG_FORMAT`.
+- `LOG_FILE_MAX_BYTES`: Rotation threshold in bytes (10 MiB by default; invalid values fall back to the default).
+- `LOG_FILE_MAX_FILES`: Total local files retained, including the active file (5 by default, clamped to 1–50). `1` keeps only the active file.
+
 ## Operational Behavior
 
 ### RPC Failures and Rate Limits
@@ -64,6 +71,7 @@ The `.env.example` file contains the base configuration. The bot uses strict env
 ### Logs
 - Operational outputs are structured and actionable.
 - **Redaction**: Bot tokens and private payloads are never logged.
+- **Optional file sink**: `LOG_FILE` writes size-rotated JSONL with bounded retention. Writes are serialized with rotation, and disk failures are reported distinctly on stderr without stopping the poller.
 
 ## Deployment & Rollback
 
