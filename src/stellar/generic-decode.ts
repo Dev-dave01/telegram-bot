@@ -18,6 +18,7 @@
  */
 
 import { scValToNative, type rpc, type xdr } from "@stellar/stellar-sdk";
+import type { DecoderCapabilityReport } from "./decode.js";
 
 // ── Bounded Limits ───────────────────────────────────────────────────────────
 
@@ -57,15 +58,18 @@ export interface GenericRenderOptions {
   maxVecItems?: number;
   maxStringChars?: number;
   maxBytesChars?: number;
+  maxTopics?: number;
 }
 
 export interface GenericEventPayload {
-  name: "generic";
+  name: "generic" | "unknown";
   eventName: string;
   topics: string[];
   value: string;
   summary: string;
   reason?: string;
+  /** Distinguishes an unrecognized event name from a malformed known event. */
+  status?: "ok" | "unknown_event" | "malformed_event";
 }
 
 export interface GenericDecodedEvent {
@@ -88,6 +92,10 @@ export interface GenericDecodedEvent {
   /** Set to {@link DEPTH_LIMIT_REASON} when collection depth exceeded the bound. */
   reason?: string;
   payload: GenericEventPayload;
+  /** Stable status code: `ok`, `unknown_event`, or `malformed_event`. */
+  status: "ok" | "unknown_event" | "malformed_event";
+  /** Human-readable reason when `status` is not `ok`. */
+  reason?: string;
 }
 
 // ── String Sanitization & Clipping ───────────────────────────────────────────
@@ -287,6 +295,22 @@ export function renderGenericScVal(
 /** Alias of `renderGenericScVal` */
 export const renderScVal = renderGenericScVal;
 
+function renderIntegerNative(native: unknown, typeName: string): string {
+  if (typeof native === "bigint") {
+    return `${typeName}:${native.toString(10)}`;
+  }
+  if (typeof native === "number") {
+    if (!Number.isSafeInteger(native)) {
+      return `${typeName}:malformed`;
+    }
+    return `${typeName}:${native}`;
+  }
+  if (typeof native === "string" && /^-?\d+$/.test(native.trim())) {
+    return `${typeName}:${native.trim()}`;
+  }
+  return `${typeName}:malformed`;
+}
+
 function renderScValInstance(
   val: xdr.ScVal,
   depth: number,
@@ -327,7 +351,7 @@ function renderScValInstance(
     case "scvU32": {
       try {
         const native = scValToNative(val);
-        return `u32:${native}`;
+        return renderIntegerNative(native, "u32");
       } catch {
         return "u32:malformed";
       }
@@ -336,7 +360,7 @@ function renderScValInstance(
     case "scvI32": {
       try {
         const native = scValToNative(val);
-        return `i32:${native}`;
+        return renderIntegerNative(native, "i32");
       } catch {
         return "i32:malformed";
       }
@@ -345,7 +369,7 @@ function renderScValInstance(
     case "scvU64": {
       try {
         const native = scValToNative(val);
-        return `u64:${native}`;
+        return renderIntegerNative(native, "u64");
       } catch {
         return "u64:malformed";
       }
@@ -354,7 +378,7 @@ function renderScValInstance(
     case "scvI64": {
       try {
         const native = scValToNative(val);
-        return `i64:${native}`;
+        return renderIntegerNative(native, "i64");
       } catch {
         return "i64:malformed";
       }
@@ -363,7 +387,7 @@ function renderScValInstance(
     case "scvTimepoint": {
       try {
         const native = scValToNative(val);
-        return `timepoint:${native}`;
+        return renderIntegerNative(native, "timepoint");
       } catch {
         return "timepoint:malformed";
       }
@@ -372,7 +396,7 @@ function renderScValInstance(
     case "scvDuration": {
       try {
         const native = scValToNative(val);
-        return `duration:${native}`;
+        return renderIntegerNative(native, "duration");
       } catch {
         return "duration:malformed";
       }
@@ -381,7 +405,7 @@ function renderScValInstance(
     case "scvU128": {
       try {
         const native = scValToNative(val);
-        return `u128:${native}`;
+        return renderIntegerNative(native, "u128");
       } catch {
         return "u128:malformed";
       }
@@ -390,7 +414,7 @@ function renderScValInstance(
     case "scvI128": {
       try {
         const native = scValToNative(val);
-        return `i128:${native}`;
+        return renderIntegerNative(native, "i128");
       } catch {
         return "i128:malformed";
       }
@@ -399,7 +423,7 @@ function renderScValInstance(
     case "scvU256": {
       try {
         const native = scValToNative(val);
-        return `u256:${native}`;
+        return renderIntegerNative(native, "u256");
       } catch {
         return "u256:malformed";
       }
@@ -408,7 +432,7 @@ function renderScValInstance(
     case "scvI256": {
       try {
         const native = scValToNative(val);
-        return `i256:${native}`;
+        return renderIntegerNative(native, "i256");
       } catch {
         return "i256:malformed";
       }
@@ -486,6 +510,10 @@ function renderScValInstance(
         return "map:{...}";
       }
       try {
+        const collision = findDuplicateMapKey(val, maxDepth - depth);
+        if (collision) {
+          return `map:malformed(${collision.reason})`;
+        }
         const rawEntries = scValPayload(val);
         if (!Array.isArray(rawEntries)) {
           const native = scValToNative(val);
@@ -560,11 +588,14 @@ function renderNativeValue(
   }
 
   if (typeof val === "number") {
-    return Number.isInteger(val) ? `number:${val}` : `number:${val}`;
+    if (!Number.isFinite(val) || (Number.isInteger(val) && !Number.isSafeInteger(val))) {
+      return "number:malformed";
+    }
+    return `number:${val}`;
   }
 
   if (typeof val === "bigint") {
-    return `bigint:${val}`;
+    return `bigint:${val.toString(10)}`;
   }
 
   if (typeof val === "string") {
@@ -666,23 +697,37 @@ export function renderTopics(
 }
 
 function toLedger(value: unknown): number {
-  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
-  const floored = Math.floor(n);
-  return floored >= 0 ? floored : 0;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) return 0;
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    try {
+      const bn = BigInt(value.trim());
+      if (bn < 0n || bn > BigInt(Number.MAX_SAFE_INTEGER)) return 0;
+      return Number(bn);
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
 }
 
 function toPosition(value: unknown): number | null {
-  let n: number;
   if (typeof value === "number") {
-    n = value;
-  } else if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    n = Number(value.trim());
-  } else {
-    return null;
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return value;
   }
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
-  return n;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    try {
+      const bn = BigInt(value.trim());
+      if (bn < 0n || bn > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return Number(bn);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 function toTxHash(value: unknown): string {
@@ -716,6 +761,30 @@ function extractEventName(firstTopic: unknown): string {
 }
 
 /**
+ * Classify the decoded event name.
+ *
+ * - `unknown_event`: the first topic is absent or does not yield a usable name.
+ * - `malformed_event`: the first topic looks like a known event name but the
+ *   payload could not be rendered (e.g. the value rendered as `malformed`).
+ * - `ok`: a usable event name was extracted and the payload rendered cleanly.
+ */
+function classifyEventStatus(
+  eventName: string,
+  value: string,
+): { status: "ok" | "unknown_event" | "malformed_event"; reason?: string } {
+  if (eventName === "unknown" || eventName === "") {
+    return { status: "unknown_event", reason: "unrecognized event name" };
+  }
+  if (eventName.startsWith("malformed")) {
+    return { status: "malformed_event", reason: "malformed known event name" };
+  }
+  if (value === "malformed" || value.startsWith("malformed:")) {
+    return { status: "malformed_event", reason: "malformed known event payload" };
+  }
+  return { status: "ok" };
+}
+
+/**
  * Decode any Soroban event into a bounded GenericDecodedEvent.
  *
  * Never throws on malformed XDR, null fields, or oversized payloads.
@@ -739,6 +808,9 @@ export function decodeGenericEvent(
   const inSuccessfulContractCall =
     typeof event.inSuccessfulContractCall === "boolean" ? event.inSuccessfulContractCall : null;
 
+  const maxTopics = options?.maxTopics ?? MAX_GENERIC_TOPICS;
+  const hasTopicArray =
+    Array.isArray(event.topic) || Array.isArray((event as { topics?: unknown }).topics);
   const rawTopics = Array.isArray(event.topic)
     ? event.topic
     : Array.isArray((event as { topics?: unknown }).topics)
@@ -756,6 +828,7 @@ export function decodeGenericEvent(
   const topicSummary = topics.length > 0 ? topics.join(" | ") : "(none)";
   const valueSummary = value;
   const summary = `[${eventName}] ${topicSummary} => ${valueSummary}`;
+  const { status, reason } = classifyEventStatus(eventName, value);
 
   return {
     source,
@@ -785,3 +858,10 @@ export function decodeGenericEvent(
     },
   };
 }
+
+export {
+  DECODER_FINGERPRINT_VERSION,
+  fingerprintGenericEvent,
+  fingerprintDecoderOutput,
+  type SemanticFingerprint,
+} from "./decoder-fingerprint.js";
