@@ -25,8 +25,7 @@ Operational reference describing all on-disk state files maintained by the Mimir
 - **Default Path**: `./data/cursor.json` (configured via `DEFAULTS.cursorFile` in [`src/config.ts`](../src/config.ts))
 - **Write Pattern**: Atomic write-then-rename (`${cursorFile}.tmp` -> `${cursorFile}`) on every successful scan commit, graceful shutdown flush, or schema migration.
 - **Deleted**: Poller logs that no cursor was found and falls back to a cold start lookback `START_LOOKBACK_LEDGERS` (default: 60 ledgers) behind the chain tip.
-- **Corrupt**: If JSON is invalid or fails schema validation (or references an unsupported future schema version), `quarantineCorruptCursorFile` moves the corrupt file aside to `${cursorFile}.corrupt.<timestamp>` and starts cold.
-- **Recovery History**: Retains an optional, additive `recoveryHistory` array (bounded to the 20 most-recent entries) recording automatic floor rewinds (`floor_rewind`), operator restores (`restore`), and corrupt-file quarantines (`quarantine`) with UTC timestamp, reason, and before/after position metadata only (no event payloads, event IDs, or secrets). Malformed history entries are dropped on load without discarding resume positions.
+- **Corrupt**: If JSON is invalid, contains duplicate target definitions, fails schema validation, or references an unsupported future schema version, `quarantineCorruptCursorFile` moves the corrupt file aside to `${cursorFile}.corrupt.<timestamp>` without mutating in-memory cursor state and starts cold. Offline `npm run cursor -- backup|restore` commands also reject duplicate target definitions with a specific validation error while preserving the original file.
 
 ### 2. Cursor Backup Copy
 - **Writer Module**: [`src/poller.ts`](../src/poller.ts) (`saveCursors`)
@@ -77,10 +76,9 @@ Operational reference describing all on-disk state files maintained by the Mimir
 - **Deleted**: Frees lock if deleted while stopped. If deleted while running, secondary processes could race.
 - **Corrupt**: Stale lock cleanup checks whether PID is running; if file cannot be parsed or PID is dead/unresponsive, the lock is unlinked and reclaimed.
 
-### 8. Digest Delivery Journal (`DIGEST_DELIVERY_FILE`)
-- **Writer Module**: [`src/notifications/schedule.ts`](../src/notifications/schedule.ts) (`FileDigestDeliveryStore`)
-- **Default Path**: `./data/digest-delivery.jsonl`
-- **Write Pattern**: Append-only (`open` with `"a"` and `handle.sync()`) with JSONL lines for `intent`, `confirmed`, `failed`, and `completed`. Compacted atomically (`.tmp` then rename) once settled digests exceed entry or byte thresholds.
-- **Deleted**: If missing, treated as empty journal on boot.
-- **Corrupt**: Reading skips malformed/torn lines without failing. Uncorrupted checkpoints and outcomes remain readable.
-- **Recovery Role**: Persists page-level outcomes per destination for multi-page digests. On restart, confirmed pages are skipped to prevent duplicate delivery, and uncertain in-flight sends are surfaced and reported.
+### 8. Event Archive Files
+- **Writer Module**: [`src/stellar/archive.ts`](../src/stellar/archive.ts) (`createEventArchive`, `readArchive`)
+- **Default Path**: Configured archive directory (`events-<timestamp>-<index>.jsonl`)
+- **Write Pattern**: Rotating JSON Lines (`JSONL`) files with `0o600` permissions. Each record is explicitly stamped with `schemaVersion: 1`.
+- **Deleted**: Directory and files are recreated on subsequent append operations.
+- **Corrupt / Unknown Version**: `readArchive` validates JSON and schema versions using migration adapters (`migrateArchivedRecord`, `adaptArchivedTypedEvent`, `adaptArchivedGenericEvent`). Legacy unversioned formats (including `blockTime`, `txIndex`, and unversioned envelopes) are transparently migrated to schema version 1. Unknown schema versions reject and throw `UnsupportedArchiveVersionError` without leaking payload contents; passing `retainCommitted: true` yields valid preceding records.
